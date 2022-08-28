@@ -32,7 +32,10 @@ const obj = new Proxy(data, {
         if(key === 'raw'){
             return target
         }
-        track(target, key)
+        // 如果key的类型是symbol 则不进行迭代 因为数组有迭代器属性 在遍历数组的时候会读取这个遍历属性，此时无需收集依赖
+        if(!isReadonly && typeof key !== 'symbol'){
+            track(target, key)
+        }
         // 使用Reflect.get是为了避免一下这种更改this属性的情况
         // const data = { // 实际调用get的时候 this是原始对象data 而不是 代理对象obj
         //     foo: 1,
@@ -40,13 +43,26 @@ const obj = new Proxy(data, {
         //         return this.foo
         //     }
         // }
-        return Reflect.get(target, key, receiver)
+        const res = Reflect.get(target, key, recevier)
+        if(typeof res === 'object' && res !== null){
+            return reactive(res)
+        }
+        return res
     },
     set(target, key, newVal,receiver){
         // 先获取旧值
         const oldValue = target[key]
         // 如果属性不存在，说明是添加新属性，否则就是设置已有属性
-        const type = Object.prototype.hasOwnProperty.call(target, key) ? 'SET' : 'ADD'
+        // 通过索引设置数组值的时候，可能会间接的改了数组的长度
+        // 示例
+        // const arr = reactive(['foo'])
+        // effect(()=>{
+        //     console.log(arr.length)
+        // })
+        // arr[1] = 'bar'
+        const type = Array.isArray(target)
+        ? Number(key) < target.length ? 'SET' : 'ADD'
+        : Object.prototype.hasOwnProperty.call(target, key) ? 'SET' : 'ADD'
         const res = Reflect.set(target, key, newVal,receiver)
         // 避免原型链访问子元素不存在的属性但是父元素存在属性，
         // 修改子元素数据，父元素属性也收集了一次effect函数依赖，导致effect执行两次的原因
@@ -83,7 +99,8 @@ const obj = new Proxy(data, {
     // 解决方案就是 当添加属性的时候，我们将与ITERATE_KEY关联的副作用函数取出来执行就好了 在trigger函数内解决
     ownKeys(target){
         // ownkeys 用来获取target上所有的key 明显不和任何key绑定，所以我们自己构造唯一的key做为标识
-        track(target, ITERATE_KEY)
+        // 如果操作对象是数组，使用length属性建立响应联系
+        track(target, Array.isArray(target) ? 'length' : ITERATE_KEY)
         return Reflect.ownKeys(target)
     },
     deleteProperty(target, key){
@@ -172,7 +189,7 @@ function track(target, key) {
     deps.add(activeEffect)
     activeEffect.deps.push(deps)
 }
-function trigger(target, key, type){
+function trigger(target, key, type, newVal){
     const depsMap = bucket.get(target)
     if(!depsMap) return
     // 取得与key关联的副作用函数
@@ -195,6 +212,27 @@ function trigger(target, key, type){
         iterateEffects && iterateEffects.forEach(effectFn => {
             if(effectFn !== activeEffect){
                 effectsToRun.add(effectFn)
+            }
+        })
+    }
+    // 当操作是ADD并且是数组时，取出length相关联的effect执行
+    if(type === 'ADD' && Array.isArray(target)){
+        const lengthEffects = depsMap.get('length')
+        lengthEffects && lengthEffects.forEach(effectFn => {
+            if(effectFn !== activeEffect){
+                effectsToRun.add(effectFn)
+            }
+        })
+    }
+    // 如果操作目标是数组，并且修改了数组的length属性,length 旧值 < 新值
+    if(Array.isArray(target) && key === 'length'){
+        depsMap.forEach((effects, key) => {
+            if(key >= newVal){
+                effects.forEach(effectFn => {
+                    if(effectFn !== activeEffect){
+                        effectsToRun.add(effectFn)
+                    }
+                })
             }
         })
     }
@@ -332,16 +370,34 @@ function reactive(obj){
         }
     })
 }
+const reactiveMap = new Map()
 // 深浅响应结合
 function createReactive(obj, isShallow = false, isReadonly = false){
+    // 解决
+    // const obj = {}
+    // const arr = reactive([obj])
+    // console.log(arr.includes(arr[0])) //false
+    // 因为访问arr[0]的时候在之前的对象判断里定义为对象可以再次被代理, 所以此时的arr[0]是代理对象不是原生对象，因此返回false
+    const existionProxy = reactiveMap.get(obj)
+    if(existionProxy) return existionProxy
     return new Proxy(obj, {
         get(target, key, recevier){
             if(key === 'raw'){
                 return target
             }
+            // 解决
+            // const obj = {}
+            // const arr = reactive([obj])
+            // console.log(arr.includes(obj)) //false
+            // 因为includes访问arr[0]指的是代理对象arr 找不到 obj
+
+            if(Array.isArray(target) && arrayInstrumentations.hasOwnProperty(key)){
+                return Reflect.get(arrayInstrumentations, key, receiver)
+            }
+    
             // 非只读才建立响应联系
-            if(!isReadonly){
-                track(target,key)
+            if(!isReadonly && typeof key !== 'symbol'){
+                track(target, key)
             }
             const res = Reflect.get(target, key, recevier)
             if(isShallow){
@@ -358,11 +414,13 @@ function createReactive(obj, isShallow = false, isReadonly = false){
                 return true
             }
             const oldValue = target[key]
-            const type = Object.prototype.hasOwnProperty.call(target, key) ? 'SET' : 'ADD'
+            const type = Array.isArray(target)
+            ? Number(key) < target.length ? 'SET' : 'ADD'
+            : Object.prototype.hasOwnProperty.call(target, key) ? 'SET' : 'ADD'
             const res = Reflect.set(target, key, newVal,receiver)
             if(target === receiver.raw){
                 if(oldValue !== newValue && (oldValue === oldValue || newValue === newValue)){
-                    trigger(target, key , type)
+                    trigger(target, key , type, newVal)
                 }
             }
             return res
@@ -390,3 +448,40 @@ function readonly(obj){
 function shallowReadonly(obj){
     return createReactive(obj, true, true)
 }
+// 数组是一个异质对象
+
+// 读取操作有
+
+// 通过索引访问数组元素值 arr[0]
+// 访问数组的长度
+// 把数组做为对象，使用foo...in循环遍历
+// 使用for...of迭代数组
+// 数组的原型方法 concat/join/every/some/find/findIndex/includes
+
+// 设置操作有
+
+// 通过索引设置数组元素值 arr[0] = 2
+// 修改数组长度 arr.length  = 3
+// 数组的栈方法 push/pop/shift/unshift
+// 修改原数组的原型方法 splice/fill/sort
+
+
+// 修改length属性也会影响数组元素
+const arr = reactive(['foo'])
+effect(()=>{
+    console.log(arr[0])
+})
+arr.length = 0
+
+const arrayInstrumentations = {}
+;['includes', 'indexof', 'lastIndexOf'].forEach(method => {
+    const originMethod = Array.prototype[method]
+    arrayInstrumentations[method] = function (...args){
+        // this是代理对象， 先在代理对象上查找结果存储在res中
+        let res = originMethod.apply(this, args)
+        if(res === false || res === -1){
+            res = originMethod.apply(this.raw, args)
+        }
+        return res
+    }
+})
