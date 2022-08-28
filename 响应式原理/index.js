@@ -28,6 +28,10 @@
 // 在副作用函数中读取了某个响应式数据，响应式数据变化了，副作用函数要执行
 const obj = new Proxy(data, {
     get(target, key, receiver){
+        // 代理对象可以通过raw属性访问原始数据
+        if(key === 'raw'){
+            return target
+        }
         track(target, key)
         // 使用Reflect.get是为了避免一下这种更改this属性的情况
         // const data = { // 实际调用get的时候 this是原始对象data 而不是 代理对象obj
@@ -39,11 +43,30 @@ const obj = new Proxy(data, {
         return Reflect.get(target, key, receiver)
     },
     set(target, key, newVal,receiver){
+        // 先获取旧值
+        const oldValue = target[key]
         // 如果属性不存在，说明是添加新属性，否则就是设置已有属性
         const type = Object.prototype.hasOwnProperty.call(target, key) ? 'SET' : 'ADD'
         const res = Reflect.set(target, key, newVal,receiver)
-        // 将 type 传给 trigger
-        trigger(target, key , type)
+        // 避免原型链访问子元素不存在的属性但是父元素存在属性，
+        // 修改子元素数据，父元素属性也收集了一次effect函数依赖，导致effect执行两次的原因
+        // 通过判断target是真正调用者recevier的原始数据判断是否要将effect函数收集到target的副作用依赖中
+        // 从原型上继承属性的情况 示例
+        // const obj = {}
+        // const proto = { bar: 1 }
+        // const child = reactive(obj)
+        // const parent = reactive(proto)
+        // Object.setPrototypeOf(child, parent)
+        // effect(()=>{
+        //     console.log(child.bar)
+        // })
+        // child.bar = 2
+        if(target === receiver.raw){
+            // 将 type 传给 trigger
+            if(oldValue !== newValue && (oldValue === oldValue || newValue === newValue)){
+                trigger(target, key , type)
+            }
+        }
         // 触发for...in的副作用执行
         // trigger(target, ITERATE_KEY)
         return res
@@ -288,4 +311,82 @@ function traverse(value, seen = new Set()){
     for(const k in value){
         traverse(value[k], seen)
     }
+}
+// 浅响应
+function shallowReactive(obj){
+    return new Proxy(obj, {/**/})
+}
+// 深响应
+function reactive(obj){
+    return new Proxy(obj, {
+        get(target, key, recevier){
+            if(key === 'raw'){
+                return target
+            }
+            track(target,key)
+            const res = Reflect.get(target, key, recevier)
+            if(typeof res === 'object' && res !== null){
+                return reactive(res)
+            }
+            return res
+        }
+    })
+}
+// 深浅响应结合
+function createReactive(obj, isShallow = false, isReadonly = false){
+    return new Proxy(obj, {
+        get(target, key, recevier){
+            if(key === 'raw'){
+                return target
+            }
+            // 非只读才建立响应联系
+            if(!isReadonly){
+                track(target,key)
+            }
+            const res = Reflect.get(target, key, recevier)
+            if(isShallow){
+                return res
+            }
+            if(typeof res === 'object' && res !== null){
+                return isReadonly ? readonly(res) : reactive(res)
+            }
+            return res
+        },
+        set(target, key, newVal, receiver){
+            if(isReadonly) {
+                console.warn(`属性${key}是只读的`)
+                return true
+            }
+            const oldValue = target[key]
+            const type = Object.prototype.hasOwnProperty.call(target, key) ? 'SET' : 'ADD'
+            const res = Reflect.set(target, key, newVal,receiver)
+            if(target === receiver.raw){
+                if(oldValue !== newValue && (oldValue === oldValue || newValue === newValue)){
+                    trigger(target, key , type)
+                }
+            }
+            return res
+        },
+        deleteProperty(target, key){
+            if(isReadonly) {
+                console.warn(`属性${key}是只读的`)
+                return true
+            }
+            const hadKey = Object.prototype.hasOwnProperty.call(target,key)
+            const res = Reflect.defineProperty(target, key)
+    
+            if(res && hadKey) {
+                trigger(target, key, 'DELETE')
+            }
+    
+            return res
+        }
+    })
+}
+
+function readonly(obj){
+    return createReactive(obj, false, true)
+}
+function shallowReadonly(obj){
+    return createReactive(obj, true, true)
 }
