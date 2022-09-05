@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<body>
+<ul>
+    <ul>
+        <li><a href='/home'>home</a></li>
+        <li><a href='/about'>about</a></li>
+
+        <div id="routeView"></div>
+    </ul>
+</ul>
+</body>
+<script>
+    // history 提供类似 hashchange 事件的 popstate 事件，但 popstate 事件有些不同：
+    // 通过浏览器前进后退改变 URL 时会触发 popstate 事件
+    // 通过pushState/replaceState或<a>标签改变 URL 不会触发 popstate 事件。
+    // 好在我们可以拦截 pushState/replaceState的调用和<a>标签的点击事件来检测 URL 变化
+    // 通过js 调用history的back，go，forward方法课触发该事件
+    let routerView = routeView
+    window.addEventListener('DOMContentLoaded', onLoad)
+    window.addEventListener('popstate', ()=>{
+        routerView.innerHTML = location.pathname
+    })
+    function onLoad () {
+        routerView.innerHTML = location.pathname
+        var linkList = document.querySelectorAll('a[href]')
+        linkList.forEach(el => el.addEventListener('click', function (e) {
+            e.preventDefault()
+            history.pushState({ name: location.pathname }, '', el.getAttribute('href'))
+            routerView.innerHTML = location.pathname
+        }))
+    }
+    // 如果点击浏览器的前进和后退，前进和后退的页面是pushState或者replaceState切换的页面
+    // 或者在 JavaScript 中调用 history.back() 方法 history.go() 方法 history.forward()方法
+    // 那么此时event.state就是pushState的第一个state状态值
+    window.onpopstate = function(event) {
+        console.log(event.state, event)
+    };
+
+
+</script>
+</html>
